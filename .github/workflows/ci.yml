@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday — catches Playwright updates
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        fedora: [41, 42, 43]
+      fail-fast: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image (Fedora ${{ matrix.fedora }})
+        run: |
+          docker build \
+            --build-arg FEDORA_VERSION=${{ matrix.fedora }} \
+            -t playwright-fedora:${{ matrix.fedora }} \
+            .
+
+      - name: Run tests
+        run: |
+          docker run --rm \
+            --shm-size=1g \
+            playwright-fedora:${{ matrix.fedora }}
