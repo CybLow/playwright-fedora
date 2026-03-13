@@ -1,11 +1,11 @@
 ARG FEDORA_VERSION=43
 FROM fedora:${FEDORA_VERSION}
 
-# System deps needed for setup (cmake, gcc, nasm for libjpeg build)
+# System deps needed for setup (binutils + zstd for .deb extraction)
 RUN dnf install -y \
-        nodejs npm git cmake gcc gcc-c++ nasm \
+        nodejs npm git \
         xorg-x11-server-Xvfb dbus-x11 mesa-dri-drivers \
-        sudo curl binutils zstd libatomic \
+        sudo curl binutils zstd tar findutils libatomic \
         mesa-libEGL mesa-libGLES mesa-libgbm libwayland-server \
     && dnf clean all
 

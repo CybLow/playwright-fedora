@@ -2,13 +2,13 @@
 # playwright-fedora-setup -- Install Playwright + all Fedora system dependencies
 #
 # Playwright's `install-deps` only supports Debian/Ubuntu.
-# This script installs the equivalent Fedora packages, builds a compat libjpeg
-# (with JPEG8 ABI symbols), and patches WebKit wrappers so all 3 browser
+# This script installs the equivalent Fedora packages, downloads compat
+# libraries from Ubuntu 24.04, and patches WebKit wrappers so all 3 browser
 # engines work correctly on Fedora.
 #
 # Usage:
 #   ./setup.sh              # Full setup (deps + compat libs + browsers + verify)
-#   ./setup.sh --deps-only  # Only install system deps + build compat libs
+#   ./setup.sh --deps-only  # Only install system deps + download compat libs
 #   ./setup.sh --browsers   # Only install/update browsers + patch wrappers
 #   ./setup.sh --patch      # Only patch WebKit wrappers (after manual browser install)
 #   ./setup.sh --check      # Verify everything works
@@ -40,6 +40,15 @@ warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()   { echo -e "${RED}[FAIL]${NC} $*" >&2; }
 die()   { err "$@"; exit 1; }
 
+# ── Architecture detection ────────────────────────────────────
+# Returns "arch:libdir" for Ubuntu .deb packages
+deb_arch() {
+    case "$(uname -m)" in
+        aarch64) echo "arm64:usr/lib/aarch64-linux-gnu" ;;
+        *)       echo "amd64:usr/lib/x86_64-linux-gnu" ;;
+    esac
+}
+
 # ── Parse arguments ────────────────────────────────────────────
 for arg in "$@"; do
     case "$arg" in
@@ -55,7 +64,7 @@ Usage: setup.sh [OPTIONS]
 
 Options:
   (no args)     Full setup: system deps + compat libs + browsers + verify
-  --deps-only   Only install system deps + build compat libjpeg
+  --deps-only   Only install system deps + download compat libs
   --browsers    Only install/update Playwright browsers + patch wrappers
   --patch       Only patch WebKit wrappers (after npx playwright install)
   --check       Verify installation (launch each browser engine)
@@ -95,10 +104,9 @@ verify_fedora() {
 install_deps() {
     info "Installing Playwright system dependencies..."
 
-    # --- Build tools (needed for compat libjpeg) ---
-    local build_deps=(
-        cmake gcc gcc-c++ nasm git
-        curl binutils zstd
+    # --- Tools (needed for downloading/extracting compat libraries) ---
+    local tool_deps=(
+        curl binutils zstd tar findutils
     )
 
     # --- Chromium / Chrome for Testing ---
@@ -134,7 +142,7 @@ install_deps() {
     )
 
     local all_deps=(
-        "${build_deps[@]}"
+        "${tool_deps[@]}"
         "${chromium_deps[@]}"
         "${firefox_deps[@]}"
         "${webkit_deps[@]}"
@@ -148,27 +156,28 @@ install_deps() {
     fi
     ok "System dependencies installed"
 
-    # Build compat libs for WebKit
-    build_webkit_compat
+    # Install compat libs for WebKit
+    install_webkit_compat
 }
 
-# ── Build WebKit compat libraries ──────────────────────────────
-build_webkit_compat() {
-    info "Building WebKit compatibility libraries..."
+# ── Install WebKit compat libraries ───────────────────────────
+install_webkit_compat() {
+    info "Installing WebKit compatibility libraries..."
 
     # --- libjpeg-turbo with JPEG8 ABI ---
     # Fedora exports LIBJPEG_6.2 version symbols; Playwright's Ubuntu-built
-    # WebKit expects LIBJPEG_8.0. Building with -DWITH_JPEG8=1 fixes this.
+    # WebKit expects LIBJPEG_8.0. We download Ubuntu's libjpeg-turbo8 package
+    # which provides libjpeg.so.8 with the correct symbols.
     if [ -f "$COMPAT_DIR/lib64/libjpeg.so.8" ]; then
         local existing_sym
         existing_sym=$(objdump -p "$COMPAT_DIR/lib64/libjpeg.so.8" 2>/dev/null | grep -o 'LIBJPEG_8.0' || true)
         if [ "$existing_sym" = "LIBJPEG_8.0" ]; then
-            ok "Compat libjpeg (LIBJPEG_8.0) already built"
+            ok "Compat libjpeg (LIBJPEG_8.0) already installed"
         else
-            build_compat_libjpeg
+            download_compat_libjpeg
         fi
     else
-        build_compat_libjpeg
+        download_compat_libjpeg
     fi
 
     # --- libjxl soversion symlink ---
@@ -202,6 +211,11 @@ install_icu_compat() {
 
     info "Installing ICU 74 compat libraries for WebKit..."
 
+    local arch_info lib_arch lib_dir
+    arch_info=$(deb_arch)
+    lib_arch="${arch_info%%:*}"
+    lib_dir="${arch_info#*:}"
+
     local tmp_dir="/tmp/playwright-icu-compat-$$"
     rm -rf "$tmp_dir"
     mkdir -p "$tmp_dir" "$icu_dir"
@@ -210,37 +224,43 @@ install_icu_compat() {
     # Try multiple package versions since Ubuntu updates revisions
     local downloaded=false
     for deb_ver in 74.2-1ubuntu3 74.2-1ubuntu4 74.2-1ubuntu3.1; do
-        local deb_url="http://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_${deb_ver}_amd64.deb"
+        local deb_url="https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_${deb_ver}_${lib_arch}.deb"
         if curl -fsSL -o "$tmp_dir/libicu74.deb" "$deb_url" 2>/dev/null; then
             downloaded=true
             break
         fi
     done
     if [ "$downloaded" = false ]; then
-        # Last resort: try launchpad
-        curl -fsSL -o "$tmp_dir/libicu74.deb" \
-            "http://launchpadlibrarian.net/723802542/libicu74_74.2-1ubuntu3_amd64.deb" 2>/dev/null || {
-            warn "Could not download ICU 74 package. WebKit may not work."
-            rm -rf "$tmp_dir"
-            return
-        }
+        warn "Could not download ICU 74 package. WebKit may not work."
+        rm -rf "$tmp_dir"
+        return
     fi
 
     # Extract .deb (it's an ar archive containing data.tar)
     pushd "$tmp_dir" >/dev/null
-    ar x libicu74.deb 2>/dev/null
-    # data.tar may be .xz, .zst, or .gz
-    if [ -f data.tar.zst ]; then
-        tar --zstd -xf data.tar.zst ./usr/lib/x86_64-linux-gnu/ 2>/dev/null || true
-    elif [ -f data.tar.xz ]; then
-        tar -xJf data.tar.xz ./usr/lib/x86_64-linux-gnu/ 2>/dev/null || true
-    elif [ -f data.tar.gz ]; then
-        tar -xzf data.tar.gz ./usr/lib/x86_64-linux-gnu/ 2>/dev/null || true
+    if ! ar x libicu74.deb 2>/dev/null; then
+        warn "Failed to extract ICU .deb package"
+        popd >/dev/null; rm -rf "$tmp_dir"; return
     fi
+
+    local data_tar
+    data_tar=$(ls data.tar.* 2>/dev/null | head -1)
+    if [ -z "$data_tar" ]; then
+        warn "No data.tar found in ICU .deb"
+        popd >/dev/null; rm -rf "$tmp_dir"; return
+    fi
+
+    local tar_flags=""
+    case "$data_tar" in
+        *.zst) tar_flags="--zstd" ;;
+        *.xz)  tar_flags="-J" ;;
+        *.gz)  tar_flags="-z" ;;
+    esac
+    tar $tar_flags -xf "$data_tar" "./$lib_dir/" 2>/dev/null || true
     popd >/dev/null
 
     # Copy ICU libs to compat directory
-    local extracted="$tmp_dir/usr/lib/x86_64-linux-gnu"
+    local extracted="$tmp_dir/$lib_dir"
     if [ -d "$extracted" ]; then
         cp -a "$extracted"/libicu*.so.74* "$icu_dir/" 2>/dev/null || true
         local count
@@ -257,32 +277,76 @@ install_icu_compat() {
     rm -rf "$tmp_dir"
 }
 
-build_compat_libjpeg() {
-    info "Building libjpeg-turbo with JPEG8 ABI (LIBJPEG_8.0 symbols)..."
+download_compat_libjpeg() {
+    info "Installing libjpeg with JPEG8 ABI (LIBJPEG_8.0 symbols)..."
 
-    for cmd in cmake gcc nasm git; do
-        if ! command -v "$cmd" &>/dev/null; then
-            die "Missing build dependency: $cmd (install with: sudo dnf install $cmd)"
+    local arch_info lib_arch lib_dir
+    arch_info=$(deb_arch)
+    lib_arch="${arch_info%%:*}"
+    lib_dir="${arch_info#*:}"
+
+    local tmp_dir="/tmp/playwright-libjpeg-compat-$$"
+    rm -rf "$tmp_dir"
+    mkdir -p "$tmp_dir" "$COMPAT_DIR/lib64"
+
+    # Download Ubuntu 24.04's libjpeg-turbo8 package (provides libjpeg.so.8
+    # with LIBJPEG_8.0 symbols that Playwright's WebKit requires)
+    local downloaded=false
+    for deb_ver in 2.1.5-2ubuntu2 2.1.5-2ubuntu1 2.1.5-2build1; do
+        local url="https://archive.ubuntu.com/ubuntu/pool/main/libj/libjpeg-turbo/libjpeg-turbo8_${deb_ver}_${lib_arch}.deb"
+        if curl -fsSL -o "$tmp_dir/libjpeg8.deb" "$url" 2>/dev/null; then
+            downloaded=true
+            break
         fi
     done
 
-    local build_dir="/tmp/playwright-libjpeg-build-$$"
-    rm -rf "$build_dir"
-    git clone --depth=1 https://github.com/libjpeg-turbo/libjpeg-turbo.git "$build_dir" 2>&1 | tail -1
-    mkdir -p "$build_dir/build"
+    if [ "$downloaded" = false ]; then
+        warn "Could not download libjpeg-turbo8 package. WebKit may not work."
+        rm -rf "$tmp_dir"
+        return
+    fi
 
-    pushd "$build_dir/build" >/dev/null
-    cmake .. \
-        -DWITH_JPEG8=1 \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX="$COMPAT_DIR" \
-        >/dev/null 2>&1
-    make -j"$(nproc)" >/dev/null 2>&1
-    make install >/dev/null 2>&1
+    # Extract .deb (it's an ar archive containing data.tar)
+    pushd "$tmp_dir" >/dev/null
+    if ! ar x libjpeg8.deb 2>/dev/null; then
+        warn "Failed to extract libjpeg .deb package"
+        popd >/dev/null; rm -rf "$tmp_dir"; return
+    fi
+
+    local data_tar
+    data_tar=$(ls data.tar.* 2>/dev/null | head -1)
+    if [ -z "$data_tar" ]; then
+        warn "No data.tar found in libjpeg .deb"
+        popd >/dev/null; rm -rf "$tmp_dir"; return
+    fi
+
+    local tar_flags=""
+    case "$data_tar" in
+        *.zst) tar_flags="--zstd" ;;
+        *.xz)  tar_flags="-J" ;;
+        *.gz)  tar_flags="-z" ;;
+    esac
+    tar $tar_flags -xf "$data_tar" "./$lib_dir/" 2>/dev/null || true
     popd >/dev/null
 
-    rm -rf "$build_dir"
-    ok "Built compat libjpeg -> $COMPAT_DIR/lib64/"
+    # Copy libjpeg files to compat directory
+    local extracted="$tmp_dir/$lib_dir"
+    if [ -d "$extracted" ]; then
+        cp -a "$extracted"/libjpeg.so.8* "$COMPAT_DIR/lib64/" 2>/dev/null || true
+        # Create libjpeg.so.8 symlink if only the versioned file was copied
+        if [ ! -e "$COMPAT_DIR/lib64/libjpeg.so.8" ]; then
+            local versioned
+            versioned=$(ls "$COMPAT_DIR/lib64"/libjpeg.so.8.* 2>/dev/null | head -1)
+            if [ -n "$versioned" ]; then
+                ln -sf "$(basename "$versioned")" "$COMPAT_DIR/lib64/libjpeg.so.8"
+            fi
+        fi
+        ok "Installed compat libjpeg -> $COMPAT_DIR/lib64/"
+    else
+        warn "Could not extract libjpeg from .deb package"
+    fi
+
+    rm -rf "$tmp_dir"
 }
 
 # ── Patch WebKit MiniBrowser wrappers ──────────────────────────
@@ -306,7 +370,7 @@ patch_webkit_wrappers() {
                     continue
                 fi
                 if grep -q 'export LD_LIBRARY_PATH=' "$wrapper"; then
-                    sed -i "s|export LD_LIBRARY_PATH=\"|export LD_LIBRARY_PATH=\"\${HOME}/.local/lib/playwright-compat/lib64:\${HOME}/.local/lib/playwright-compat/icu:|" "$wrapper"
+                    sed -i "s|export LD_LIBRARY_PATH=\"|export LD_LIBRARY_PATH=\"\${HOME}/.local/lib/playwright-compat/lib64:\${HOME}/.local/lib/playwright-compat/icu:\${HOME}/.local/lib/playwright-compat:|" "$wrapper"
                     patched=$((patched + 1))
                 fi
             done

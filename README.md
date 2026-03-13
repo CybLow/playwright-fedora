@@ -26,16 +26,22 @@ bash setup.sh          # Full setup (system deps + compat libs + browsers + veri
 bash setup.sh --install   # Install pw wrapper to your shell
 ```
 
+## Upstream PR
+
+Native Fedora support has been submitted upstream: [microsoft/playwright#39661](https://github.com/microsoft/playwright/pull/39661). Once merged, `npx playwright install-deps` and `npx playwright install` will work natively on Fedora without this project.
+
+Until then, this project provides a standalone solution.
+
 ## What it does
 
 1. **Installs system dependencies** via `dnf` (Chromium, Firefox, WebKit runtime libs including mesa-libGLES, mesa-libEGL, libavif, libatomic, gstreamer, etc.)
-2. **Builds a compat `libjpeg-turbo`** from source with `-DWITH_JPEG8=1` — Fedora's version exports `LIBJPEG_6.2` symbols but Playwright's WebKit needs `LIBJPEG_8.0`
+2. **Downloads Ubuntu 24.04's `libjpeg-turbo8` package** — Fedora's version exports `LIBJPEG_6.2` symbols but Playwright's WebKit needs `LIBJPEG_8.0`
 3. **Downloads ICU 74 compat libraries** from Ubuntu 24.04 — Fedora ships ICU 75-77+ which are not ABI-compatible with Playwright's WebKit (built on Ubuntu 24.04)
 4. **Creates libjxl soversion symlinks** — Fedora has `libjxl.so.0.11`, Playwright expects `libjxl.so.0.8`
 5. **Patches WebKit MiniBrowser wrappers** to load compat libraries (the wrappers overwrite `LD_LIBRARY_PATH`, ignoring the parent env)
 6. **Installs shell wrappers** (`pw` command for fish/bash/zsh)
 
-The compat libraries are installed to `~/.local/lib/playwright-compat/` and do **not** affect system libraries.
+The compat libraries are installed to `~/.local/lib/playwright-compat/` and do **not** affect system libraries. No compiler toolchain (cmake, gcc, nasm) is required.
 
 ## Usage
 
@@ -82,7 +88,7 @@ WebKit links against `libjpeg.so.8` with `LIBJPEG_8.0` ELF version symbols (Ubun
 /lib64/libjpeg.so.8: version `LIBJPEG_8.0' not found
 ```
 
-**Fix:** Build libjpeg-turbo from source with `-DWITH_JPEG8=1` into `~/.local/lib/playwright-compat/lib64/`.
+**Fix:** Download Ubuntu 24.04's `libjpeg-turbo8` package (which provides `libjpeg.so.8` with `LIBJPEG_8.0` symbols) into `~/.local/lib/playwright-compat/lib64/`.
 
 ### ICU (International Components for Unicode)
 
