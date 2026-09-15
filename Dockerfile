@@ -1,4 +1,4 @@
-ARG FEDORA_VERSION=43
+ARG FEDORA_VERSION=44
 FROM fedora:${FEDORA_VERSION}
 
 # System deps needed for setup (binutils + zstd for .deb extraction)
@@ -33,18 +33,20 @@ RUN mkdir -p /home/pwuser/test-run \
 
 # Copy test files into the npm project so require('playwright') works
 RUN cp /home/pwuser/playwright-fedora/tests/test-browsers.js /home/pwuser/test-run/ \
-    && cp /home/pwuser/playwright-fedora/tests/test-cli.sh /home/pwuser/test-run/
+    && cp /home/pwuser/playwright-fedora/tests/test-cli.sh /home/pwuser/test-run/ \
+    && cp /home/pwuser/playwright-fedora/tests/test-deps.sh /home/pwuser/test-run/ \
+    && cp -r /home/pwuser/playwright-fedora/tests/fixtures /home/pwuser/test-run/
 
-ENV LD_LIBRARY_PATH="/home/pwuser/.local/lib/playwright-compat/lib64:/home/pwuser/.local/lib/playwright-compat/icu:/home/pwuser/.local/lib/playwright-compat:/usr/lib64" \
-    PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 \
+ENV LD_LIBRARY_PATH="/home/pwuser/.local/lib/playwright-compat/lib64:/home/pwuser/.local/lib/playwright-compat/icu:/home/pwuser/.local/lib/playwright-compat" \
     LIBGL_ALWAYS_SOFTWARE=1 \
     MESA_GL_VERSION_OVERRIDE=3.3
 
-# Run all tests (headless-only since no display in Docker; use xvfb for CLI)
+# Run headless and headed browser tests under a virtual display.
 # IMPORTANT: Run with --shm-size=1g (Chromium crashes with Docker's default 64MB)
 CMD ["bash", "-c", "\
-    echo '=== Browser API Tests (headless) ===' && \
-    cd /home/pwuser/test-run && node test-browsers.js --headless-only && \
+    cd /home/pwuser/test-run && bash test-deps.sh && \
+    echo '=== Browser API Tests (headless + headed) ===' && \
+    xvfb-run --auto-servernum -- node test-browsers.js && \
     echo '' && \
     echo '=== CLI Tests (xvfb) ===' && \
     xvfb-run --auto-servernum -- bash test-cli.sh \

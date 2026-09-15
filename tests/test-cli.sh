@@ -2,8 +2,9 @@
 # Test native Playwright CLI commands on Fedora
 set -uo pipefail
 
-export LD_LIBRARY_PATH="${HOME}/.local/lib/playwright-compat/lib64:${HOME}/.local/lib/playwright-compat/icu:${HOME}/.local/lib/playwright-compat:/usr/lib64:${LD_LIBRARY_PATH:-}"
-export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1
+export LD_LIBRARY_PATH="${HOME}/.local/lib/playwright-compat/lib64:${HOME}/.local/lib/playwright-compat/icu:${HOME}/.local/lib/playwright-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+# Exercise Playwright's dependency validation, including the Fedora 44 libav check.
+unset PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS
 
 PASS="\033[32mPASS\033[0m"
 FAIL="\033[31mFAIL\033[0m"

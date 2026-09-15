@@ -7,6 +7,8 @@
 //   node tests/test-browsers.js --headless-only # Skip headed tests (for CI/Docker)
 //   node tests/test-browsers.js --browser=chromium  # Single browser
 
+// Do not mask missing host dependencies in integration tests.
+delete process.env.PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS;
 const { chromium, firefox, webkit } = require("playwright");
 
 const args = process.argv.slice(2);
@@ -229,6 +231,26 @@ const browsers = selectedBrowser
             await ctx.close();
             if (!path) throw new Error("no video path");
         });
+
+        if (bName === "WebKit") {
+            await test("H.264 video playback", async () => {
+                const page = await browser.newPage();
+                try {
+                    await page.route("http://media.test/h264.mp4", route => route.fulfill({
+                        contentType: "video/mp4",
+                        path: require("path").join(__dirname, "fixtures/h264.mp4"),
+                    }));
+                    await page.setContent('<video muted src="http://media.test/h264.mp4"></video>');
+                    await page.evaluate(() => document.querySelector("video").play());
+                    await page.waitForFunction(() => {
+                        const video = document.querySelector("video");
+                        return video.currentTime > 0 && video.videoWidth === 64;
+                    }, null, { timeout: 10000 });
+                } finally {
+                    await page.close();
+                }
+            });
+        }
 
         await test("File download", async () => {
             const page = await browser.newPage();

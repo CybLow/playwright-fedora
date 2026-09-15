@@ -2,7 +2,7 @@
 # https://github.com/CybLow/playwright-fedora
 
 function pw --description "Playwright wrapper for Fedora"
-    set -lx LD_LIBRARY_PATH $HOME/.local/lib/playwright-compat/lib64 $HOME/.local/lib/playwright-compat/icu $HOME/.local/lib/playwright-compat /usr/lib64 $LD_LIBRARY_PATH
+    set -lx LD_LIBRARY_PATH $HOME/.local/lib/playwright-compat/lib64 $HOME/.local/lib/playwright-compat/icu $HOME/.local/lib/playwright-compat $LD_LIBRARY_PATH
     set -lx PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS 1
 
     if test (count $argv) -eq 0

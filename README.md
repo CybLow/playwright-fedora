@@ -34,7 +34,7 @@ Until then, this project provides a standalone solution.
 
 ## What it does
 
-1. **Installs system dependencies** via `dnf` (Chromium, Firefox, WebKit runtime libs including mesa-libGLES, mesa-libEGL, libavif, libatomic, gstreamer, etc.)
+1. **Installs system dependencies** via `dnf` (including GTK 4) and enables **RPM Fusion Free** for WebKit H.264 support (`libavcodec-freeworld` and `x264-libs`, alongside Fedora's `gstreamer1-plugin-libav`).
 2. **Downloads Ubuntu 24.04's `libjpeg-turbo8` package** — Fedora's version exports `LIBJPEG_6.2` symbols but Playwright's WebKit needs `LIBJPEG_8.0`
 3. **Downloads ICU 74 compat libraries** from Ubuntu 24.04 — Fedora ships ICU 75-77+ which are not ABI-compatible with Playwright's WebKit (built on Ubuntu 24.04)
 4. **Creates libjxl soversion symlinks** — Fedora has `libjxl.so.0.11`, Playwright expects `libjxl.so.0.8`
@@ -118,6 +118,40 @@ export LD_LIBRARY_PATH="${HOME}/.local/lib/playwright-compat/lib64:${HOME}/.loca
 
 All compat libraries are scoped to the Playwright process tree only — other applications continue using the system libraries.
 
+### Fedora 44: `gstreamer1.0-libav` / H.264
+
+Playwright's `gstreamer1.0-libav` error means its dependency checker could not
+find `libx264`. Having `gstreamer1` or Fedora's libav plugin installed is not
+enough: WebKit also needs H.264 codecs. Setup enables RPM Fusion **Free** and
+installs `libavcodec-freeworld` and `x264-libs`; RPM Fusion Nonfree is not needed.
+These are system codec packages, separate from the private JPEG/ICU libraries.
+
+The wrappers leave the system library directories to the dynamic linker so
+RPM Fusion's codec library takes precedence over Fedora's limited version.
+Setup also refreshes the current user's GStreamer decoder cache.
+
+To update an existing installation, run the one-liner installer again, restart
+your shell, then run `pw setup`. From a checkout:
+
+```bash
+git pull
+bash setup.sh --install
+# Restart your shell to load the updated wrapper, then:
+pw setup
+pw check
+```
+
+For direct `npx` / `pnpm exec` commands, provide the private compat libraries:
+
+```bash
+export LD_LIBRARY_PATH="$HOME/.local/lib/playwright-compat/lib64:$HOME/.local/lib/playwright-compat/icu:$HOME/.local/lib/playwright-compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+pnpm exec playwright test
+```
+
+Do not explicitly prepend `/usr/lib64` to `LD_LIBRARY_PATH`: it overrides the
+system's preferred codec library. The test suite checks dependency validation
+and actual WebKit H.264 playback without skipping host requirements.
+
 ## Environment variables
 
 | Variable | Purpose |
@@ -130,6 +164,7 @@ All compat libraries are scoped to the Playwright process tree only — other ap
 
 | Version | Status |
 |---------|--------|
+| Fedora 44 | Tested in CI (default Docker image) |
 | Fedora 43 | Tested in CI |
 | Fedora 42 | Tested in CI |
 | Fedora 41 | Tested in CI |
@@ -151,9 +186,9 @@ Use `ARG FEDORA_VERSION` to test specific versions:
 docker build --build-arg FEDORA_VERSION=42 -t playwright-fedora:42 .
 ```
 
-## Tested features (70 pass)
+## Tested features
 
-**61 browser API tests** across Chromium, Firefox, and WebKit:
+**Browser API tests** across Chromium, Firefox, and WebKit:
 
 - Launch headless / headed
 - Navigation, title, content
@@ -169,6 +204,7 @@ docker build --build-arg FEDORA_VERSION=42 -t playwright-fedora:42 .
 - Viewport / device emulation
 - Geolocation emulation
 - Video recording
+- H.264 video playback (WebKit)
 - File download handling
 - Console message capture
 - Request/response events
@@ -186,6 +222,9 @@ docker build --build-arg FEDORA_VERSION=42 -t playwright-fedora:42 .
 - PDF generation
 - Cache clearing
 - Install dry-run
+
+The container also checks the GStreamer H.264 decoder and `libx264` availability,
+and runs headed browser tests under Xvfb.
 
 ## License
 

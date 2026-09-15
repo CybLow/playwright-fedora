@@ -7,7 +7,7 @@
 pw() {
     local _pw_old_ldpath="${LD_LIBRARY_PATH:-}"
     local _pw_old_skip="${PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS:-}"
-    export LD_LIBRARY_PATH="$HOME/.local/lib/playwright-compat/lib64:$HOME/.local/lib/playwright-compat/icu:$HOME/.local/lib/playwright-compat:/usr/lib64:${LD_LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="$HOME/.local/lib/playwright-compat/lib64:$HOME/.local/lib/playwright-compat/icu:$HOME/.local/lib/playwright-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1
 
     # Ensure env is restored on return (even on early exit)
