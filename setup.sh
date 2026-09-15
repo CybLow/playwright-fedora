@@ -96,7 +96,7 @@ verify_fedora() {
     fi
     info "Detected Fedora $VERSION_ID"
     if [ "${VERSION_ID:-0}" -lt 39 ] 2>/dev/null; then
-        warn "Fedora $VERSION_ID is older than the tested range (39-43). Things may not work."
+        warn "Fedora $VERSION_ID is older than the supported range (39-44). Things may not work."
     fi
 }
 
@@ -125,13 +125,13 @@ install_deps() {
 
     # --- WebKit ---
     local webkit_deps=(
-        gstreamer1 gstreamer1-plugins-base
+        gtk4 gstreamer1 gstreamer1-plugins-base
         gstreamer1-plugins-good gstreamer1-plugins-bad-free
         libsoup3 libgcrypt enchant2 libsecret
         hyphen libmanette openjpeg2 woff2
         harfbuzz-icu libwebp lcms2 libjxl
         libatomic mesa-libEGL mesa-libGLES mesa-libgbm
-        libwayland-server gstreamer1-libav libavif flite
+        libwayland-server gstreamer1-plugin-libav libavif flite
     )
 
     # --- General / shared ---
@@ -156,8 +156,41 @@ install_deps() {
     fi
     ok "System dependencies installed"
 
+    install_h264_codecs
+
     # Install compat libs for WebKit
     install_webkit_compat
+}
+
+# Playwright reports "gstreamer1.0-libav" when libx264 is absent. Fedora's
+# GStreamer libav plugin also needs RPM Fusion's codec library to decode H.264.
+install_h264_codecs() {
+    # Keep an existing working codec installation (including full FFmpeg).
+    if gst-inspect-1.0 avdec_h264 >/dev/null 2>&1 &&
+        /sbin/ldconfig -p | grep -F 'libx264.so' >/dev/null; then
+        ok "GStreamer H.264 decoding and libx264 are already available"
+        return
+    fi
+    local elevate=()
+    [ "$(id -u)" -eq 0 ] || elevate=(sudo)
+
+    if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
+        info "Enabling RPM Fusion Free for WebKit H.264 codecs..."
+        "${elevate[@]}" dnf install -y \
+            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm --eval '%{fedora}').noarch.rpm"
+    fi
+    # Unlike optional desktop packages, missing codecs must fail setup.
+    "${elevate[@]}" dnf install -y libavcodec-freeworld x264-libs gstreamer1-plugin-libav
+
+    # GStreamer caches the decoder list even when only libavcodec has changed.
+    local registry_dir="${XDG_CACHE_HOME:-$HOME/.cache}/gstreamer-1.0"
+    if [ -d "$registry_dir" ]; then
+        find "$registry_dir" -maxdepth 1 -name 'registry.*.bin' -type f -delete
+    fi
+    gst-inspect-1.0 avdec_h264 >/dev/null || die "GStreamer H.264 decoder cannot be loaded"
+    /sbin/ldconfig -p | grep -F 'libx264.so' >/dev/null ||
+        die "libx264 is missing from the linker cache"
+    ok "GStreamer H.264 decoding and libx264 are available"
 }
 
 # ── Install WebKit compat libraries ───────────────────────────
@@ -411,7 +444,8 @@ install_playwright_npm() {
 # ── Install browsers ───────────────────────────────────────────
 install_browsers() {
     info "Installing Playwright browsers (Chromium, Firefox, WebKit)..."
-    npx playwright install chromium firefox webkit 2>&1
+    LD_LIBRARY_PATH="${COMPAT_DIR}/lib64:${COMPAT_DIR}/icu:${COMPAT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+        npx playwright install chromium firefox webkit 2>&1
     ok "All browsers installed"
 
     # Auto-patch WebKit wrappers
@@ -430,7 +464,7 @@ check_installation() {
     info "Verifying Playwright installation..."
     echo ""
 
-    export LD_LIBRARY_PATH="${COMPAT_DIR}/lib64:${COMPAT_DIR}/icu:${COMPAT_DIR}:${LD_LIBRARY_PATH:-/usr/lib64}"
+    export LD_LIBRARY_PATH="${COMPAT_DIR}/lib64:${COMPAT_DIR}/icu:${COMPAT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1
 
     local all_good=true
@@ -544,6 +578,11 @@ install_wrappers() {
         ok "Installed pw.fish -> ~/.config/fish/functions/"
     fi
 
+    # Refresh the shared bash/zsh function on upgrades as well as first install.
+    mkdir -p "$HOME/.local/share/playwright-fedora"
+    cp "$script_dir/shell/pw.bash" "$HOME/.local/share/playwright-fedora/pw.bash"
+    ok "Installed pw.bash -> ~/.local/share/playwright-fedora/"
+
     # Install bash function
     local bashrc="$HOME/.bashrc"
     if [ -f "$bashrc" ]; then
@@ -555,9 +594,6 @@ if [ -f "$HOME/.local/share/playwright-fedora/pw.bash" ]; then
     source "$HOME/.local/share/playwright-fedora/pw.bash"
 fi
 BASHEOF
-            mkdir -p "$HOME/.local/share/playwright-fedora"
-            cp "$script_dir/shell/pw.bash" "$HOME/.local/share/playwright-fedora/pw.bash"
-            ok "Installed pw.bash -> ~/.local/share/playwright-fedora/"
         else
             ok "Bash integration already installed"
         fi

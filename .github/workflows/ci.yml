@@ -11,7 +11,7 @@ jobs:
   test:
     strategy:
       matrix:
-        fedora: [41, 42, 43]
+        fedora: [41, 42, 43, 44]
       fail-fast: false
     runs-on: ubuntu-latest
     timeout-minutes: 45
