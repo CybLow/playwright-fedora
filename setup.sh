@@ -21,6 +21,7 @@ set -euo pipefail
 # ── Config ─────────────────────────────────────────────────────
 COMPAT_DIR="${PLAYWRIGHT_COMPAT_DIR:-$HOME/.local/lib/playwright-compat}"
 BROWSER_DIR="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+NPM_DIR="${PLAYWRIGHT_NPM_DIR:-$HOME/.local/lib/playwright-npm}"
 CI_MODE=false
 MODE="full"
 
@@ -57,6 +58,7 @@ for arg in "$@"; do
         --patch)     MODE="patch" ;;
         --check)     MODE="check" ;;
         --install)   MODE="install" ;;
+        --npm)       MODE="npm" ;;
         --ci)        CI_MODE=true ;;
         --help|-h)
             cat <<'EOF'
@@ -68,6 +70,7 @@ Options:
   --browsers    Only install/update Playwright browsers + patch wrappers
   --patch       Only patch WebKit wrappers (after npx playwright install)
   --check       Verify installation (launch each browser engine)
+  --npm         Only install the Playwright npm package
   --install     Install pw wrapper + setup script to ~/.local/bin
   --ci          Non-interactive mode (no color, suitable for Docker/CI)
   --help        Show this message
@@ -75,6 +78,7 @@ Options:
 Environment:
   PLAYWRIGHT_COMPAT_DIR    Override compat lib location (default: ~/.local/lib/playwright-compat)
   PLAYWRIGHT_BROWSERS_PATH Override browser cache location (default: ~/.cache/ms-playwright)
+  PLAYWRIGHT_NPM_DIR       Override npm package location (default: ~/.local/lib/playwright-npm)
 EOF
             exit 0
             ;;
@@ -417,33 +421,79 @@ patch_webkit_wrappers() {
     fi
 }
 
-# ── Install Playwright npm package ─────────────────────────────
+# ── Playwright npm package ─────────────────────────────────────
+# Echo a NODE_PATH under which require('playwright') resolves, or return 1.
+#
+# Note: `npx playwright --version` is NOT a usable probe here. When playwright
+# is absent, npx silently downloads a throwaway copy into ~/.npm/_npx/<hash>/
+# and exits 0 -- so it reports success while leaving nothing installed, and
+# that cache directory is not on Node's module resolution path.
+playwright_node_path() {
+    local candidates="${NPM_DIR}/node_modules"
+    local global_root
+    if global_root=$(npm root -g 2>/dev/null) && [ -n "$global_root" ]; then
+        candidates="${candidates}:${global_root}"
+    fi
+    if NODE_PATH="$candidates" node -e "require.resolve('playwright')" &>/dev/null; then
+        printf '%s' "$candidates"
+        return 0
+    fi
+    return 1
+}
+
+# Export NODE_PATH/PATH so both `require('playwright')` and the CLI resolve.
+playwright_activate() {
+    local np="$1"
+    export NODE_PATH="${np}${NODE_PATH:+:${NODE_PATH}}"
+    local dir
+    while IFS= read -r dir; do
+        if [ -d "${dir}/.bin" ]; then
+            export PATH="${dir}/.bin:$PATH"
+        fi
+    done <<< "${np//:/$'\n'}"
+    # Explicit: under `set -e` a falsy final test would abort the caller.
+    return 0
+}
+
 install_playwright_npm() {
     if ! command -v node &>/dev/null; then
         die "Node.js not found. Install with: sudo dnf install nodejs"
     fi
 
-    # Detect if playwright is already available
-    if npx playwright --version &>/dev/null 2>&1; then
+    local np
+    if np=$(playwright_node_path); then
+        playwright_activate "$np"
         local ver
-        ver=$(npx playwright --version 2>/dev/null || echo "unknown")
-        ok "Playwright already available (v${ver})"
-    else
-        info "Installing Playwright..."
-        if command -v bun &>/dev/null; then
-            bun install -g playwright @playwright/test
-        elif command -v pnpm &>/dev/null; then
-            pnpm add -g playwright @playwright/test
-        else
-            npm install -g playwright @playwright/test
-        fi
-        ok "Playwright installed"
+        ver=$(npx playwright --version 2>/dev/null | awk '{print $NF}')
+        ok "Playwright already available (v${ver:-unknown})"
+        return 0
     fi
+
+    # Install into a self-contained prefix. A global (`npm install -g`) install
+    # is deliberately avoided: npm's global root (e.g. /usr/local/lib/node_modules)
+    # is not writable without sudo on a default Fedora install, and is not one of
+    # Node's globalPaths, so require('playwright') would not resolve from it.
+    info "Installing Playwright into ${NPM_DIR}..."
+    mkdir -p "$NPM_DIR"
+    npm install --prefix "$NPM_DIR" --no-fund --no-audit playwright @playwright/test \
+        || die "npm install failed. Check network access and Node.js version (node -v)."
+
+    np=$(playwright_node_path) || die "Playwright installed but still unresolvable in ${NPM_DIR}"
+    playwright_activate "$np"
+    ok "Playwright installed"
 }
 
 # ── Install browsers ───────────────────────────────────────────
 install_browsers() {
     info "Installing Playwright browsers (Chromium, Firefox, WebKit)..."
+
+    # Use the managed install so npx does not re-download a throwaway copy
+    # (which also emits a spurious "install your project's dependencies" warning).
+    local np
+    if np=$(playwright_node_path); then
+        playwright_activate "$np"
+    fi
+
     LD_LIBRARY_PATH="${COMPAT_DIR}/lib64:${COMPAT_DIR}/icu:${COMPAT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
         npx playwright install chromium firefox webkit 2>&1
     ok "All browsers installed"
@@ -469,14 +519,29 @@ check_installation() {
 
     local all_good=true
 
-    if npx playwright --version &>/dev/null; then
+    # The browser launch tests below use require('playwright'), which resolves
+    # from ./node_modules and NODE_PATH only -- never from npm's global root or
+    # the npx cache. Point NODE_PATH at the managed install before testing.
+    local np pkg_ok=true
+    if np=$(playwright_node_path); then
+        playwright_activate "$np"
         ok "playwright CLI: $(npx playwright --version 2>/dev/null)"
     else
-        err "playwright CLI not found"
+        err "playwright npm package not found"
+        err "  Install it with: ${0} --npm"
+        err "  (or directly: npm install --prefix '${NPM_DIR}' playwright @playwright/test)"
+        pkg_ok=false
         all_good=false
     fi
 
+    # Without a resolvable package every launch test fails identically with
+    # "Cannot find module", which obscures the real cause reported above.
+    if [ "$pkg_ok" = false ]; then
+        warn "Skipping browser launch tests until the npm package is installed"
+    fi
+
     for browser in chromium firefox webkit; do
+        [ "$pkg_ok" = false ] && break
         if [ "$browser" = "webkit" ] && ! ls -d "$BROWSER_DIR/webkit-"* &>/dev/null 2>&1; then
             warn "webkit: not installed"
             continue
@@ -652,6 +717,9 @@ main() {
             ;;
         install)
             install_wrappers
+            ;;
+        npm)
+            install_playwright_npm
             ;;
     esac
 }

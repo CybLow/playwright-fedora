@@ -5,6 +5,19 @@ function pw --description "Playwright wrapper for Fedora"
     set -lx LD_LIBRARY_PATH $HOME/.local/lib/playwright-compat/lib64 $HOME/.local/lib/playwright-compat/icu $HOME/.local/lib/playwright-compat $LD_LIBRARY_PATH
     set -lx PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS 1
 
+    # Point Node at the managed install so `require('playwright')` resolves and
+    # npx uses it instead of downloading a throwaway copy into ~/.npm/_npx/.
+    # Declared at function scope, then assigned inside the block: `set -lx`
+    # within an `if` would be scoped to that block and lost on exit.
+    set -l _pw_npm_dir $HOME/.local/lib/playwright-npm
+    test -n "$PLAYWRIGHT_NPM_DIR"; and set _pw_npm_dir $PLAYWRIGHT_NPM_DIR
+    set -lx NODE_PATH $NODE_PATH
+    set -lx PATH $PATH
+    if test -d $_pw_npm_dir/node_modules
+        set NODE_PATH $_pw_npm_dir/node_modules $NODE_PATH
+        set PATH $_pw_npm_dir/node_modules/.bin $PATH
+    end
+
     if test (count $argv) -eq 0
         echo "pw -- Playwright wrapper for Fedora"
         echo ""
