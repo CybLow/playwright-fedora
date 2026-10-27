@@ -7,11 +7,22 @@
 pw() {
     local _pw_old_ldpath="${LD_LIBRARY_PATH:-}"
     local _pw_old_skip="${PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS:-}"
+    local _pw_old_nodepath="${NODE_PATH:-}"
+    local _pw_old_path="$PATH"
     export LD_LIBRARY_PATH="$HOME/.local/lib/playwright-compat/lib64:$HOME/.local/lib/playwright-compat/icu:$HOME/.local/lib/playwright-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1
 
+    # Point Node at the managed install so `require('playwright')` resolves and
+    # npx uses it instead of downloading a throwaway copy into ~/.npm/_npx/.
+    # A project-local ./node_modules still takes precedence over NODE_PATH.
+    local _pw_npm_modules="${PLAYWRIGHT_NPM_DIR:-$HOME/.local/lib/playwright-npm}/node_modules"
+    if [ -d "$_pw_npm_modules" ]; then
+        export NODE_PATH="${_pw_npm_modules}${NODE_PATH:+:${NODE_PATH}}"
+        export PATH="${_pw_npm_modules}/.bin:$PATH"
+    fi
+
     # Ensure env is restored on return (even on early exit)
-    trap 'export LD_LIBRARY_PATH="$_pw_old_ldpath"; [ -z "$_pw_old_skip" ] && unset PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS || export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS="$_pw_old_skip"; trap - RETURN' RETURN
+    trap 'export LD_LIBRARY_PATH="$_pw_old_ldpath"; export PATH="$_pw_old_path"; [ -z "$_pw_old_nodepath" ] && unset NODE_PATH || export NODE_PATH="$_pw_old_nodepath"; [ -z "$_pw_old_skip" ] && unset PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS || export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS="$_pw_old_skip"; trap - RETURN' RETURN
 
     case "${1:-}" in
         "")
