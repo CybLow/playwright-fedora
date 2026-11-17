@@ -12,6 +12,8 @@
 #   ./setup.sh --browsers   # Only install/update browsers + patch wrappers
 #   ./setup.sh --patch      # Only patch WebKit wrappers (after manual browser install)
 #   ./setup.sh --check      # Verify everything works
+#   ./setup.sh --npm        # Only install the Playwright npm package
+#   ./setup.sh --run [args] # Run the resolved Playwright CLI
 #   ./setup.sh --install    # Install pw wrapper + setup script to ~/.local
 #   ./setup.sh --ci         # Non-interactive mode (no color, no TTY checks)
 #   ./setup.sh --help
@@ -21,8 +23,10 @@ set -euo pipefail
 # ── Config ─────────────────────────────────────────────────────
 COMPAT_DIR="${PLAYWRIGHT_COMPAT_DIR:-$HOME/.local/lib/playwright-compat}"
 BROWSER_DIR="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+NPM_DIR="${PLAYWRIGHT_NPM_DIR:-$HOME/.local/lib/playwright-npm}"
 CI_MODE=false
 MODE="full"
+CLI_ARGS=()
 
 # ── Colors ─────────────────────────────────────────────────────
 setup_colors() {
@@ -50,13 +54,18 @@ deb_arch() {
 }
 
 # ── Parse arguments ────────────────────────────────────────────
-for arg in "$@"; do
+setup_colors
+while [ "$#" -gt 0 ]; do
+    arg="$1"
+    shift
     case "$arg" in
         --deps-only) MODE="deps" ;;
         --browsers)  MODE="browsers" ;;
         --patch)     MODE="patch" ;;
         --check)     MODE="check" ;;
         --install)   MODE="install" ;;
+        --npm)       MODE="npm" ;;
+        --run)       MODE="run"; CLI_ARGS=("$@"); break ;;
         --ci)        CI_MODE=true ;;
         --help|-h)
             cat <<'EOF'
@@ -68,6 +77,8 @@ Options:
   --browsers    Only install/update Playwright browsers + patch wrappers
   --patch       Only patch WebKit wrappers (after npx playwright install)
   --check       Verify installation (launch each browser engine)
+  --npm         Only install the Playwright npm package
+  --run [args]  Run the installed Playwright CLI (project-local version first)
   --install     Install pw wrapper + setup script to ~/.local/bin
   --ci          Non-interactive mode (no color, suitable for Docker/CI)
   --help        Show this message
@@ -75,6 +86,7 @@ Options:
 Environment:
   PLAYWRIGHT_COMPAT_DIR    Override compat lib location (default: ~/.local/lib/playwright-compat)
   PLAYWRIGHT_BROWSERS_PATH Override browser cache location (default: ~/.cache/ms-playwright)
+  PLAYWRIGHT_NPM_DIR       Override npm package location (default: ~/.local/lib/playwright-npm)
 EOF
             exit 0
             ;;
@@ -164,6 +176,39 @@ install_deps() {
 
 # Playwright reports "gstreamer1.0-libav" when libx264 is absent. Fedora's
 # GStreamer libav plugin also needs RPM Fusion's codec library to decode H.264.
+install_h264_packages() {
+    local elevate=()
+    [ "$(id -u)" -eq 0 ] || elevate=(sudo)
+
+    if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
+        info "Enabling RPM Fusion Free for WebKit H.264 codecs..."
+        "${elevate[@]}" dnf install -y \
+            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm --eval '%{fedora}').noarch.rpm" || return $?
+    fi
+    # Unlike optional desktop packages, missing codecs must fail setup.
+    if "${elevate[@]}" dnf install -y libavcodec-freeworld x264-libs gstreamer1-plugin-libav; then
+        return 0
+    fi
+
+    # MirrorManager can advertise an obsolete repomd.xml checksum (Fedora 42).
+    # Retry at RPM Fusion's primary HTTPS server with package signatures enabled.
+    # These overrides apply to this transaction, not the user's repo files.
+    local fedora_version basearch
+    fedora_version=$(rpm --eval '%{fedora}') || return $?
+    basearch=$(rpm --eval '%{_arch}') || return $?
+    warn "RPM Fusion mirrors failed; retrying codecs from download1.rpmfusion.org"
+    "${elevate[@]}" dnf --refresh \
+        --setopt=rpmfusion-free.metalink= \
+        --setopt=rpmfusion-free.mirrorlist= \
+        "--setopt=rpmfusion-free.baseurl=https://download1.rpmfusion.org/free/fedora/releases/${fedora_version}/Everything/${basearch}/os/" \
+        --setopt=rpmfusion-free.gpgcheck=1 \
+        --setopt=rpmfusion-free-updates.metalink= \
+        --setopt=rpmfusion-free-updates.mirrorlist= \
+        "--setopt=rpmfusion-free-updates.baseurl=https://download1.rpmfusion.org/free/fedora/updates/${fedora_version}/${basearch}/" \
+        --setopt=rpmfusion-free-updates.gpgcheck=1 \
+        install -y libavcodec-freeworld x264-libs gstreamer1-plugin-libav
+}
+
 install_h264_codecs() {
     # Keep an existing working codec installation (including full FFmpeg).
     if gst-inspect-1.0 avdec_h264 >/dev/null 2>&1 &&
@@ -171,16 +216,7 @@ install_h264_codecs() {
         ok "GStreamer H.264 decoding and libx264 are already available"
         return
     fi
-    local elevate=()
-    [ "$(id -u)" -eq 0 ] || elevate=(sudo)
-
-    if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
-        info "Enabling RPM Fusion Free for WebKit H.264 codecs..."
-        "${elevate[@]}" dnf install -y \
-            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm --eval '%{fedora}').noarch.rpm"
-    fi
-    # Unlike optional desktop packages, missing codecs must fail setup.
-    "${elevate[@]}" dnf install -y libavcodec-freeworld x264-libs gstreamer1-plugin-libav
+    install_h264_packages || return $?
 
     # GStreamer caches the decoder list even when only libavcodec has changed.
     local registry_dir="${XDG_CACHE_HOME:-$HOME/.cache}/gstreamer-1.0"
@@ -417,35 +453,97 @@ patch_webkit_wrappers() {
     fi
 }
 
-# ── Install Playwright npm package ─────────────────────────────
+# ── Playwright npm package ─────────────────────────────────────
+# Echo the resolved package directory, or return 1. Node checks the current
+# project's node_modules first, then the managed prefix, inherited NODE_PATH,
+# and npm's global root. No package is downloaded while probing.
+#
+# Note: `npx playwright --version` is NOT a usable probe here. When playwright
+# is absent, npx silently downloads a throwaway copy into ~/.npm/_npx/<hash>/
+# and exits 0 -- so it reports success while leaving nothing installed, and
+# that cache directory is not on Node's module resolution path.
+playwright_package_dir() {
+    local candidates="${NPM_DIR}/node_modules${NODE_PATH:+:${NODE_PATH}}"
+    local global_root
+    if global_root=$(npm root -g 2>/dev/null) && [ -n "$global_root" ]; then
+        candidates="${candidates}:${global_root}"
+    fi
+    NODE_PATH="$candidates" node -e '
+        const path = require("path");
+        const { createRequire } = require("module");
+        for (const modulesDir of require.resolve.paths("playwright")) {
+            let packageFile;
+            try {
+                packageFile = require.resolve(path.join(modulesDir, "playwright/package.json"));
+            } catch {
+                // pnpm exposes the direct @playwright/test dependency, but
+                // keeps its playwright dependency inside the virtual store.
+                try {
+                    const testFile = require.resolve(path.join(modulesDir, "@playwright/test/package.json"));
+                    packageFile = createRequire(testFile).resolve("playwright/package.json");
+                } catch {
+                    continue;
+                }
+            }
+            process.stdout.write(path.dirname(packageFile));
+            process.exit(0);
+        }
+        process.exit(1);
+    ' 2>/dev/null
+}
+
+require_playwright() {
+    command -v node &>/dev/null || die "Node.js not found. Install with: sudo dnf install nodejs npm"
+    playwright_package_dir || {
+        err "playwright npm package not found"
+        err "  Install it with: pw setup --npm (or: bash '${0}' --npm)"
+        return 1
+    }
+}
+
+run_playwright_cli() {
+    local pkg_dir
+    pkg_dir=$(require_playwright) || return 1
+    # npm exec/npx may download a different version even when a binary exists
+    # on PATH. Use the CLI from the exact package selected by the resolver.
+    # Test files in a project without its own dependencies must also be able to
+    # import @playwright/test from the selected shared installation.
+    NODE_PATH="$(dirname "$pkg_dir")${NODE_PATH:+:${NODE_PATH}}" node "$pkg_dir/cli.js" "$@"
+}
+
 install_playwright_npm() {
     if ! command -v node &>/dev/null; then
         die "Node.js not found. Install with: sudo dnf install nodejs"
     fi
 
-    # Detect if playwright is already available
-    if npx playwright --version &>/dev/null 2>&1; then
+    local pkg_dir
+    if pkg_dir=$(playwright_package_dir); then
         local ver
-        ver=$(npx playwright --version 2>/dev/null || echo "unknown")
-        ok "Playwright already available (v${ver})"
-    else
-        info "Installing Playwright..."
-        if command -v bun &>/dev/null; then
-            bun install -g playwright @playwright/test
-        elif command -v pnpm &>/dev/null; then
-            pnpm add -g playwright @playwright/test
-        else
-            npm install -g playwright @playwright/test
-        fi
-        ok "Playwright installed"
+        ver=$(node "$pkg_dir/cli.js" --version)
+        ok "Playwright already available (${ver})"
+        return 0
     fi
+
+    # Install into a self-contained prefix. A global (`npm install -g`) install
+    # is deliberately avoided: npm's global root (e.g. /usr/local/lib/node_modules)
+    # is not writable without sudo on a default Fedora install, and is not one of
+    # Node's globalPaths, so require('playwright') would not resolve from it.
+    info "Installing Playwright into ${NPM_DIR}..."
+    command -v npm &>/dev/null || die "npm not found. Install with: sudo dnf install npm"
+    mkdir -p "$NPM_DIR"
+    npm install --prefix "$NPM_DIR" --no-fund --no-audit playwright @playwright/test \
+        || die "npm install failed. Check network access and Node.js version (node -v)."
+
+    pkg_dir=$(playwright_package_dir) || die "Playwright installed but still unresolvable in ${NPM_DIR}"
+    ok "Playwright installed"
 }
 
 # ── Install browsers ───────────────────────────────────────────
 install_browsers() {
     info "Installing Playwright browsers (Chromium, Firefox, WebKit)..."
+
     LD_LIBRARY_PATH="${COMPAT_DIR}/lib64:${COMPAT_DIR}/icu:${COMPAT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
-        npx playwright install chromium firefox webkit 2>&1
+        run_playwright_cli install chromium firefox webkit
     ok "All browsers installed"
 
     # Auto-patch WebKit wrappers
@@ -469,40 +567,57 @@ check_installation() {
 
     local all_good=true
 
-    if npx playwright --version &>/dev/null; then
-        ok "playwright CLI: $(npx playwright --version 2>/dev/null)"
+    # Resolve once and use this exact package for the CLI and every engine.
+    local pkg_dir ver pkg_ok=true
+    if pkg_dir=$(require_playwright); then
+        if ver=$(node "$pkg_dir/cli.js" --version); then
+            ok "playwright CLI: $ver"
+        else
+            err "playwright CLI failed"
+            pkg_ok=false
+            all_good=false
+        fi
     else
-        err "playwright CLI not found"
+        pkg_ok=false
         all_good=false
     fi
 
+    # Without a resolvable package every launch test fails identically with
+    # "Cannot find module", which obscures the real cause reported above.
+    if [ "$pkg_ok" = false ]; then
+        warn "Skipping browser launch tests until the npm package is installed"
+    fi
+
+    local check_tmp
+    mkdir -p "${TMPDIR:-$HOME/.cache/codex-tmp}"
+    check_tmp=$(mktemp -d "${TMPDIR:-$HOME/.cache/codex-tmp}/pw-check.XXXXXX")
+    trap 'rm -rf "$check_tmp"' EXIT
+
     for browser in chromium firefox webkit; do
+        [ "$pkg_ok" = false ] && break
         if [ "$browser" = "webkit" ] && ! ls -d "$BROWSER_DIR/webkit-"* &>/dev/null 2>&1; then
             warn "webkit: not installed"
             continue
         fi
 
-        # Try require('playwright'), then fallback to require('playwright-core')
-        local test_script="
+        local test_script='
             (async () => {
-                let pw;
-                try { pw = require('playwright'); }
-                catch { pw = require('playwright-core'); }
-                const b = await pw.${browser}.launch({ headless: true });
+                const pw = require(process.argv[1]);
+                const b = await pw[process.argv[2]].launch({ headless: true });
                 const page = await b.newPage();
-                await page.setContent('<h1>ok</h1>');
-                const text = await page.textContent('h1');
-                if (text === 'ok') process.stdout.write('ok');
+                await page.setContent("<h1>ok</h1>");
+                const text = await page.textContent("h1");
+                if (text === "ok") process.stdout.write("ok");
                 await b.close();
-            })().catch(e => { process.stderr.write(e.message.split('\n')[0]); process.exit(1); });
-        "
+            })().catch(e => { process.stderr.write(e.message.split("\n")[0]); process.exit(1); });
+        '
         local result=""
-        if result=$(node -e "$test_script" 2>/tmp/pw-check-$browser.log) && [ "$result" = "ok" ]; then
+        if result=$(node -e "$test_script" "$pkg_dir" "$browser" 2>"$check_tmp/$browser.log") && [ "$result" = "ok" ]; then
             ok "$browser: launches and renders correctly"
         else
             err "$browser: failed to launch"
-            if [ -s "/tmp/pw-check-$browser.log" ]; then
-                err "  $(head -1 /tmp/pw-check-$browser.log)"
+            if [ -s "$check_tmp/$browser.log" ]; then
+                err "  $(head -1 "$check_tmp/$browser.log")"
             fi
             all_good=false
         fi
@@ -620,6 +735,10 @@ ZSHEOF
 
 # ── Main ───────────────────────────────────────────────────────
 main() {
+    if [ "$MODE" = "run" ]; then
+        run_playwright_cli "${CLI_ARGS[@]}"
+        return
+    fi
     echo ""
     echo -e "${BOLD}Playwright Fedora Setup${NC}"
     echo ""
@@ -652,6 +771,9 @@ main() {
             ;;
         install)
             install_wrappers
+            ;;
+        npm)
+            install_playwright_npm
             ;;
     esac
 }

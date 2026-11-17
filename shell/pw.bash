@@ -4,14 +4,11 @@
 # Source this file in your .bashrc or .zshrc:
 #   source ~/.local/share/playwright-fedora/pw.bash
 
-pw() {
-    local _pw_old_ldpath="${LD_LIBRARY_PATH:-}"
-    local _pw_old_skip="${PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS:-}"
-    export LD_LIBRARY_PATH="$HOME/.local/lib/playwright-compat/lib64:$HOME/.local/lib/playwright-compat/icu:$HOME/.local/lib/playwright-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+pw() (
+    # A subshell scopes the environment in both bash and zsh, including failures.
+    local _pw_compat_dir="${PLAYWRIGHT_COMPAT_DIR:-$HOME/.local/lib/playwright-compat}"
+    export LD_LIBRARY_PATH="${_pw_compat_dir}/lib64:${_pw_compat_dir}/icu:${_pw_compat_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1
-
-    # Ensure env is restored on return (even on early exit)
-    trap 'export LD_LIBRARY_PATH="$_pw_old_ldpath"; [ -z "$_pw_old_skip" ] && unset PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS || export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS="$_pw_old_skip"; trap - RETURN' RETURN
 
     case "${1:-}" in
         "")
@@ -26,7 +23,7 @@ pw() {
             echo "  pw check                 Verify browsers launch correctly"
             echo "  pw ui                    Open Playwright UI mode"
             echo "  pw trace <file>          Open trace viewer"
-            echo "  pw <cmd> [args...]       Pass through to npx playwright"
+            echo "  pw <cmd> [args...]       Pass through to the installed Playwright CLI"
             ;;
         setup)
             shift; playwright-fedora-setup "$@"
@@ -36,38 +33,20 @@ pw() {
             ;;
         install)
             shift
-            npx playwright install "$@"
-            __pw_patch_webkit
+            if [ ! -d "${_pw_compat_dir}/lib64" ]; then
+                echo "pw: compat libjpeg not found at ${_pw_compat_dir}/lib64 — run: pw setup" >&2
+                return 1
+            fi
+            playwright-fedora-setup --run install "$@" || return $?
+            playwright-fedora-setup --patch || return $?
             echo ""
             playwright-fedora-setup --check
             ;;
         ui)
-            shift; npx playwright test --ui "$@"
+            shift; playwright-fedora-setup --run test --ui "$@"
             ;;
         *)
-            npx playwright "$@"
+            playwright-fedora-setup --run "$@"
             ;;
     esac
-}
-
-__pw_patch_webkit() {
-    local compat_lib_dir="$HOME/.local/lib/playwright-compat/lib64"
-    if [ ! -d "$compat_lib_dir" ]; then
-        echo "pw: compat libjpeg not found at $compat_lib_dir — run: pw setup"
-        return 1
-    fi
-
-    local patched=0
-    for wrapper in "$HOME/.cache/ms-playwright"/webkit-*/minibrowser-{gtk,wpe}/MiniBrowser; do
-        [ -f "$wrapper" ] || continue
-        grep -q 'playwright-compat' "$wrapper" 2>/dev/null && continue
-        if grep -q 'export LD_LIBRARY_PATH=' "$wrapper"; then
-            sed -i 's|export LD_LIBRARY_PATH="|export LD_LIBRARY_PATH="${HOME}/.local/lib/playwright-compat/lib64:${HOME}/.local/lib/playwright-compat/icu:|' "$wrapper"
-            patched=$((patched + 1))
-        fi
-    done
-
-    if [ "$patched" -gt 0 ]; then
-        echo "pw: patched $patched WebKit wrapper(s) for Fedora compat"
-    fi
-}
+)

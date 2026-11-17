@@ -39,7 +39,8 @@ Until then, this project provides a standalone solution.
 3. **Downloads ICU 74 compat libraries** from Ubuntu 24.04 — Fedora ships ICU 75-77+ which are not ABI-compatible with Playwright's WebKit (built on Ubuntu 24.04)
 4. **Creates libjxl soversion symlinks** — Fedora has `libjxl.so.0.11`, Playwright expects `libjxl.so.0.8`
 5. **Patches WebKit MiniBrowser wrappers** to load compat libraries (the wrappers overwrite `LD_LIBRARY_PATH`, ignoring the parent env)
-6. **Installs shell wrappers** (`pw` command for fish/bash/zsh)
+6. **Installs the Playwright npm packages** into `~/.local/lib/playwright-npm` when no existing installation is found
+7. **Installs shell wrappers** (`pw` command for fish/bash/zsh)
 
 The compat libraries are installed to `~/.local/lib/playwright-compat/` and do **not** affect system libraries. No compiler toolchain (cmake, gcc, nasm) is required.
 
@@ -54,27 +55,45 @@ pw pdf https://example.com /tmp/page.pdf
 pw ui                        # Playwright UI mode
 pw install                   # Install/update browsers (auto-patches WebKit)
 pw check                     # Verify all browsers work
-pw <anything>                # Passes through to npx playwright
+pw setup --npm               # Install only the Playwright npm packages
+pw <anything>                # Run the resolved Playwright CLI
 ```
 
 > **Important:** Always use `pw install` instead of `npx playwright install` to ensure WebKit wrappers are automatically patched after browser downloads.
 
 ## Package manager support
 
-Works with any Node.js package manager:
+Full setup installs `playwright` and `@playwright/test` into the private
+`~/.local/lib/playwright-npm` prefix when needed. This npm installation needs no
+`sudo` and leaves npm's global prefix unchanged. To install only the packages:
 
 ```bash
-# npm (default)
-npm install -g playwright @playwright/test
-
-# bun
-bun install -g playwright @playwright/test
-
-# pnpm
-pnpm add -g playwright @playwright/test
+pw setup --npm
+# From a checkout, before the pw wrapper is installed:
+bash setup.sh --npm
 ```
 
-After installing Playwright, always run `pw install` (not `npx playwright install`) to auto-patch WebKit.
+You can also keep Playwright in each project with your preferred package manager:
+
+```bash
+npm install --save-dev @playwright/test
+# or:
+bun add --dev @playwright/test
+# or:
+pnpm add --save-dev @playwright/test
+```
+
+The CLI and browser verification resolve the same package: the current
+project's installation first, then the private prefix, an existing `NODE_PATH`,
+and npm's global installation. A project's pinned version therefore takes
+precedence over the shared installation. Commands use that package's CLI
+directly; they never ask `npx` to download another version. If no package is
+found, run `pw setup --npm` before `pw install` or `pw check`.
+
+After installing or updating a project's Playwright version, run `pw install`
+from that project to download its matching browsers and auto-patch WebKit.
+`pw check` returns a nonzero exit status if verification fails. The shell
+wrappers scope their environment changes to the command, including in zsh.
 
 ## How the WebKit fix works
 
@@ -130,6 +149,10 @@ The wrappers leave the system library directories to the dynamic linker so
 RPM Fusion's codec library takes precedence over Fedora's limited version.
 Setup also refreshes the current user's GStreamer decoder cache.
 
+If RPM Fusion's mirror metadata is unavailable or inconsistent, setup retries
+the codec transaction against RPM Fusion's primary HTTPS server. Package GPG
+checks remain enabled, and this fallback does not edit your repository files.
+
 To update an existing installation, run the one-liner installer again, restart
 your shell, then run `pw setup`. From a checkout:
 
@@ -159,6 +182,7 @@ and actual WebKit H.264 playback without skipping host requirements.
 | `PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS` | Set to `1` by `pw` wrapper to skip Playwright's Ubuntu-only dependency checker |
 | `PLAYWRIGHT_COMPAT_DIR` | Override compat lib location (default: `~/.local/lib/playwright-compat`) |
 | `PLAYWRIGHT_BROWSERS_PATH` | Override browser cache location (default: `~/.cache/ms-playwright`) |
+| `PLAYWRIGHT_NPM_DIR` | Override the private npm prefix (default: `~/.local/lib/playwright-npm`) |
 
 ## Supported Fedora versions
 
@@ -216,7 +240,7 @@ docker build --build-arg FEDORA_VERSION=42 -t playwright-fedora:42 .
 
 **9 CLI tests:**
 
-- `npx playwright --version`
+- Resolved Playwright CLI `--version`
 - Screenshot (chromium, firefox, webkit)
 - Screenshot with viewport / full-page
 - PDF generation
@@ -224,7 +248,21 @@ docker build --build-arg FEDORA_VERSION=42 -t playwright-fedora:42 .
 - Install dry-run
 
 The container also checks the GStreamer H.264 decoder and `libx264` availability,
-and runs headed browser tests under Xvfb.
+and runs headed browser tests under Xvfb. It verifies setup from an empty
+directory with `NODE_PATH` unset, then runs the API and CLI suites against the
+private installation without installing another local copy of Playwright.
+
+The regression suites run without browser downloads:
+
+```bash
+bash tests/test-resolution.sh
+bash tests/test-codecs.sh
+```
+
+They cover missing packages, matching package/CLI versions, project-local
+precedence, existing `NODE_PATH`, global fallback, and shell environment
+restoration, plus codec mirror fallback and installation failure propagation.
+CI runs both suites before building the Fedora images.
 
 ## License
 

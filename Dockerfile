@@ -25,29 +25,25 @@ RUN chmod +x setup.sh tests/*.sh
 # Run full setup (deps + compat libs + browsers + verify)
 RUN bash setup.sh --ci
 
-# Install playwright as a local package so tests can require() it
-RUN mkdir -p /home/pwuser/test-run \
-    && cd /home/pwuser/test-run \
-    && npm init -y --silent \
-    && npm install playwright --silent 2>&1 | tail -3
-
-# Copy test files into the npm project so require('playwright') works
-RUN cp /home/pwuser/playwright-fedora/tests/test-browsers.js /home/pwuser/test-run/ \
-    && cp /home/pwuser/playwright-fedora/tests/test-cli.sh /home/pwuser/test-run/ \
-    && cp /home/pwuser/playwright-fedora/tests/test-deps.sh /home/pwuser/test-run/ \
-    && cp -r /home/pwuser/playwright-fedora/tests/fixtures /home/pwuser/test-run/
-
 ENV LD_LIBRARY_PATH="/home/pwuser/.local/lib/playwright-compat/lib64:/home/pwuser/.local/lib/playwright-compat/icu:/home/pwuser/.local/lib/playwright-compat" \
+    NODE_PATH="/home/pwuser/.local/lib/playwright-npm/node_modules" \
+    PLAYWRIGHT_SETUP_SCRIPT="/home/pwuser/playwright-fedora/setup.sh" \
     LIBGL_ALWAYS_SOFTWARE=1 \
     MESA_GL_VERSION_OVERRIDE=3.3
+
+# Verify the installation from a directory with no local node_modules. In
+# particular, do not mask package resolution defects with another npm install.
+RUN mkdir -p /home/pwuser/test-run \
+    && cd /home/pwuser/test-run \
+    && env -u NODE_PATH bash /home/pwuser/playwright-fedora/setup.sh --check
 
 # Run headless and headed browser tests under a virtual display.
 # IMPORTANT: Run with --shm-size=1g (Chromium crashes with Docker's default 64MB)
 CMD ["bash", "-c", "\
-    cd /home/pwuser/test-run && bash test-deps.sh && \
+    cd /home/pwuser/test-run && bash /home/pwuser/playwright-fedora/tests/test-deps.sh && \
     echo '=== Browser API Tests (headless + headed) ===' && \
-    xvfb-run --auto-servernum -- node test-browsers.js && \
+    xvfb-run --auto-servernum -- node /home/pwuser/playwright-fedora/tests/test-browsers.js && \
     echo '' && \
     echo '=== CLI Tests (xvfb) ===' && \
-    xvfb-run --auto-servernum -- bash test-cli.sh \
+    xvfb-run --auto-servernum -- bash /home/pwuser/playwright-fedora/tests/test-cli.sh \
 "]
