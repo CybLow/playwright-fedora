@@ -149,6 +149,10 @@ The wrappers leave the system library directories to the dynamic linker so
 RPM Fusion's codec library takes precedence over Fedora's limited version.
 Setup also refreshes the current user's GStreamer decoder cache.
 
+If RPM Fusion's mirror metadata is unavailable or inconsistent, setup retries
+the codec transaction against RPM Fusion's primary HTTPS server. Package GPG
+checks remain enabled, and this fallback does not edit your repository files.
+
 To update an existing installation, run the one-liner installer again, restart
 your shell, then run `pw setup`. From a checkout:
 
@@ -248,15 +252,17 @@ and runs headed browser tests under Xvfb. It verifies setup from an empty
 directory with `NODE_PATH` unset, then runs the API and CLI suites against the
 private installation without installing another local copy of Playwright.
 
-The resolution regression suite runs without browser downloads:
+The regression suites run without browser downloads:
 
 ```bash
 bash tests/test-resolution.sh
+bash tests/test-codecs.sh
 ```
 
-It covers missing packages, matching package/CLI versions, project-local
+They cover missing packages, matching package/CLI versions, project-local
 precedence, existing `NODE_PATH`, global fallback, and shell environment
-restoration. CI runs this suite before building the Fedora images.
+restoration, plus codec mirror fallback and installation failure propagation.
+CI runs both suites before building the Fedora images.
 
 ## License
 

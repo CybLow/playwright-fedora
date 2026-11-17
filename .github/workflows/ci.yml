@@ -27,6 +27,9 @@ jobs:
           npm_config_offline: 'true'
         run: bash tests/test-resolution.sh
 
+      - name: Test codec repository fallback
+        run: bash tests/test-codecs.sh
+
   test:
     needs: resolution
     strategy:

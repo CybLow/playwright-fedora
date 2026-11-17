@@ -176,6 +176,39 @@ install_deps() {
 
 # Playwright reports "gstreamer1.0-libav" when libx264 is absent. Fedora's
 # GStreamer libav plugin also needs RPM Fusion's codec library to decode H.264.
+install_h264_packages() {
+    local elevate=()
+    [ "$(id -u)" -eq 0 ] || elevate=(sudo)
+
+    if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
+        info "Enabling RPM Fusion Free for WebKit H.264 codecs..."
+        "${elevate[@]}" dnf install -y \
+            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm --eval '%{fedora}').noarch.rpm" || return $?
+    fi
+    # Unlike optional desktop packages, missing codecs must fail setup.
+    if "${elevate[@]}" dnf install -y libavcodec-freeworld x264-libs gstreamer1-plugin-libav; then
+        return 0
+    fi
+
+    # MirrorManager can advertise an obsolete repomd.xml checksum (Fedora 42).
+    # Retry at RPM Fusion's primary HTTPS server with package signatures enabled.
+    # These overrides apply to this transaction, not the user's repo files.
+    local fedora_version basearch
+    fedora_version=$(rpm --eval '%{fedora}') || return $?
+    basearch=$(rpm --eval '%{_arch}') || return $?
+    warn "RPM Fusion mirrors failed; retrying codecs from download1.rpmfusion.org"
+    "${elevate[@]}" dnf --refresh \
+        --setopt=rpmfusion-free.metalink= \
+        --setopt=rpmfusion-free.mirrorlist= \
+        "--setopt=rpmfusion-free.baseurl=https://download1.rpmfusion.org/free/fedora/releases/${fedora_version}/Everything/${basearch}/os/" \
+        --setopt=rpmfusion-free.gpgcheck=1 \
+        --setopt=rpmfusion-free-updates.metalink= \
+        --setopt=rpmfusion-free-updates.mirrorlist= \
+        "--setopt=rpmfusion-free-updates.baseurl=https://download1.rpmfusion.org/free/fedora/updates/${fedora_version}/${basearch}/" \
+        --setopt=rpmfusion-free-updates.gpgcheck=1 \
+        install -y libavcodec-freeworld x264-libs gstreamer1-plugin-libav
+}
+
 install_h264_codecs() {
     # Keep an existing working codec installation (including full FFmpeg).
     if gst-inspect-1.0 avdec_h264 >/dev/null 2>&1 &&
@@ -183,16 +216,7 @@ install_h264_codecs() {
         ok "GStreamer H.264 decoding and libx264 are already available"
         return
     fi
-    local elevate=()
-    [ "$(id -u)" -eq 0 ] || elevate=(sudo)
-
-    if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
-        info "Enabling RPM Fusion Free for WebKit H.264 codecs..."
-        "${elevate[@]}" dnf install -y \
-            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm --eval '%{fedora}').noarch.rpm"
-    fi
-    # Unlike optional desktop packages, missing codecs must fail setup.
-    "${elevate[@]}" dnf install -y libavcodec-freeworld x264-libs gstreamer1-plugin-libav
+    install_h264_packages || return $?
 
     # GStreamer caches the decoder list even when only libavcodec has changed.
     local registry_dir="${XDG_CACHE_HOME:-$HOME/.cache}/gstreamer-1.0"
