@@ -2,21 +2,10 @@
 # https://github.com/CybLow/playwright-fedora
 
 function pw --description "Playwright wrapper for Fedora"
-    set -lx LD_LIBRARY_PATH $HOME/.local/lib/playwright-compat/lib64 $HOME/.local/lib/playwright-compat/icu $HOME/.local/lib/playwright-compat $LD_LIBRARY_PATH
+    set -l _pw_compat_dir $HOME/.local/lib/playwright-compat
+    test -n "$PLAYWRIGHT_COMPAT_DIR"; and set _pw_compat_dir $PLAYWRIGHT_COMPAT_DIR
+    set -lx LD_LIBRARY_PATH $_pw_compat_dir/lib64 $_pw_compat_dir/icu $_pw_compat_dir $LD_LIBRARY_PATH
     set -lx PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS 1
-
-    # Point Node at the managed install so `require('playwright')` resolves and
-    # npx uses it instead of downloading a throwaway copy into ~/.npm/_npx/.
-    # Declared at function scope, then assigned inside the block: `set -lx`
-    # within an `if` would be scoped to that block and lost on exit.
-    set -l _pw_npm_dir $HOME/.local/lib/playwright-npm
-    test -n "$PLAYWRIGHT_NPM_DIR"; and set _pw_npm_dir $PLAYWRIGHT_NPM_DIR
-    set -lx NODE_PATH $NODE_PATH
-    set -lx PATH $PATH
-    if test -d $_pw_npm_dir/node_modules
-        set NODE_PATH $_pw_npm_dir/node_modules $NODE_PATH
-        set PATH $_pw_npm_dir/node_modules/.bin $PATH
-    end
 
     if test (count $argv) -eq 0
         echo "pw -- Playwright wrapper for Fedora"
@@ -30,7 +19,7 @@ function pw --description "Playwright wrapper for Fedora"
         echo "  pw check                 Verify browsers launch correctly"
         echo "  pw ui                    Open Playwright UI mode"
         echo "  pw trace <file>          Open trace viewer"
-        echo "  pw <cmd> [args...]       Pass through to npx playwright"
+        echo "  pw <cmd> [args...]       Pass through to the installed Playwright CLI"
         return 0
     end
 
@@ -42,37 +31,19 @@ function pw --description "Playwright wrapper for Fedora"
             playwright-fedora-setup --check
 
         case install
-            npx playwright install $argv[2..]
-            __pw_patch_webkit
+            if not test -d $_pw_compat_dir/lib64
+                echo "pw: compat libjpeg not found at $_pw_compat_dir/lib64 — run: pw setup" >&2
+                return 1
+            end
+            playwright-fedora-setup --run install $argv[2..]; or return $status
+            playwright-fedora-setup --patch; or return $status
             echo ""
             playwright-fedora-setup --check
 
         case ui
-            npx playwright test --ui $argv[2..]
+            playwright-fedora-setup --run test --ui $argv[2..]
 
         case '*'
-            npx playwright $argv
-    end
-end
-
-function __pw_patch_webkit
-    set -l compat_lib_dir "$HOME/.local/lib/playwright-compat/lib64"
-    if not test -d $compat_lib_dir
-        echo "pw: compat libjpeg not found at $compat_lib_dir — run: pw setup"
-        return 1
-    end
-
-    set -l patched 0
-    for wrapper in $HOME/.cache/ms-playwright/webkit-*/minibrowser-{gtk,wpe}/MiniBrowser
-        test -f $wrapper; or continue
-        grep -q 'playwright-compat' $wrapper 2>/dev/null; and continue
-        if grep -q 'export LD_LIBRARY_PATH=' $wrapper
-            sed -i 's|export LD_LIBRARY_PATH="|export LD_LIBRARY_PATH="${HOME}/.local/lib/playwright-compat/lib64:${HOME}/.local/lib/playwright-compat/icu:|' $wrapper
-            set patched (math $patched + 1)
-        end
-    end
-
-    if test $patched -gt 0
-        echo "pw: patched $patched WebKit wrapper(s) for Fedora compat"
+            playwright-fedora-setup --run $argv
     end
 end
